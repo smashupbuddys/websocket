@@ -352,13 +352,12 @@ function createProtocolResponse(beautifulJson) {
     };
   }
   
-  const xmlBuilder = new xml2js.Builder({ 
-    rootName: null, 
+  const protocolXmlBuilder = new xml2js.Builder({ 
     headless: true,
     renderOpts: { pretty: false }
   });
   
-  return xmlBuilder.buildObject(response);
+  return protocolXmlBuilder.buildObject(response);
 }
 
 function generateDeviceToken(deviceSerial) {
@@ -473,10 +472,18 @@ wss.on('connection', (ws, req) => {
         }
         
         if (shouldRespond) {
-          const protocolResponse = createProtocolResponse(beautifulJson);
-          ws.send(protocolResponse);
-          connectionResponseTimes.set(clientIp, now);
-          logMessage('debug', `Sent protocol response to ${clientIp} for ${eventType}`);
+          try {
+            const protocolResponse = createProtocolResponse(beautifulJson);
+            ws.send(protocolResponse);
+            connectionResponseTimes.set(clientIp, now);
+            logMessage('debug', `Sent protocol response to ${clientIp} for ${eventType}`);
+          } catch (responseError) {
+            logMessage('error', `Failed to create protocol response: ${responseError.message}`);
+            // Fallback to simple response
+            const fallbackResponse = createXmlResponse('Received', 'OK');
+            ws.send(fallbackResponse);
+            logMessage('debug', `Sent fallback response to ${clientIp}`);
+          }
         } else {
           logMessage('debug', `Throttled response (last: ${timeSinceLastResponse}ms ago)`);
         }
