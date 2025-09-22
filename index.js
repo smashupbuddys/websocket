@@ -393,6 +393,26 @@ function extractTransId(xmlData, beautifulJson) {
   return null;
 }
 
+function getAttendanceStatus(xmlData) {
+  const match = xmlData.match(/<AttendStat>(.*?)<\/AttendStat>/);
+  return match ? match[1] : 'Unknown';
+}
+
+function getAdminAction(xmlData) {
+  const match = xmlData.match(/<Action>(.*?)<\/Action>/);
+  return match ? match[1] : 'Unknown';
+}
+
+function getAdminId(xmlData) {
+  const match = xmlData.match(/<AdminID>(.*?)<\/AdminID>/);
+  return match ? match[1] : 'Unknown';
+}
+
+function getTimeFromXml(xmlData) {
+  const match = xmlData.match(/<Time>(.*?)<\/Time>/);
+  return match ? match[1] : 'Unknown';
+}
+
 async function forwardToN8n(data) {
   let retries = 0;
   
@@ -411,7 +431,7 @@ async function forwardToN8n(data) {
         timeout: config.n8n.timeout
       });
       
-      logMessage('info', '✓ Forwarded to n8n:', data);
+      logMessage('info', '📤 Forwarded to n8n');
       return true;
     } catch (error) {
       retries++;
@@ -440,7 +460,6 @@ wss.on('connection', (ws, req) => {
   ws.on('message', async (data) => {
     try {
       const xmlData = data.toString();
-      logMessage('info', `Received raw XML:`, xmlData);
 
       // Convert XML to beautiful JSON format
       const connectionId = `${clientIp}-${Date.now()}`;
@@ -453,42 +472,59 @@ wss.on('connection', (ws, req) => {
       
       // If it's null, it means it's a server response - ignore it
       if (!beautifulJson) {
-        logMessage('debug', 'Ignoring server response message');
         return;
       }
 
-      // Log the beautiful conversion
+      // Clean logging for different event types
       if (beautifulJson.success) {
-        logMessage('info', `Converted to beautiful JSON:`, {
-          messageType: beautifulJson.messageType,
-          deviceId: beautifulJson.deviceInfo?.serialNumber,
-          eventType: beautifulJson.eventData?.type
-        });
+        const eventType = beautifulJson.rawEventType;
+        const deviceId = beautifulJson.deviceInfo?.serialNumber;
+        
+        if (eventType === 'TimeLog_v2') {
+          const userId = beautifulJson.eventData?.employee?.userId;
+          const action = beautifulJson.eventData?.employee?.action;
+          const attendStat = getAttendanceStatus(xmlData);
+          const time = beautifulJson.eventData?.timing?.eventTime;
+          logMessage('info', `👤 ATTENDANCE: User ${userId} | ${action} | ${attendStat} | ${time} | Device ${deviceId}`);
+        } 
+        else if (eventType === 'AdminLog_v2') {
+          const action = getAdminAction(xmlData);
+          const adminId = getAdminId(xmlData);
+          const time = getTimeFromXml(xmlData);
+          logMessage('info', `⚙️  ADMIN: ${action} | Admin ${adminId} | ${time} | Device ${deviceId}`);
+        }
+        else if (eventType === 'Register') {
+          logMessage('info', `🔌 DEVICE REGISTER: ${deviceId} connected`);
+        }
+        else if (eventType === 'Login') {
+          logMessage('info', `🔑 DEVICE LOGIN: ${deviceId} authenticated`);
+        }
+        else if (eventType === 'KeepAlive') {
+          logMessage('info', `💓 HEARTBEAT: Device ${deviceId} online`);
+        }
+        else {
+          logMessage('info', `📨 EVENT: ${eventType} | Device ${deviceId}`);
+        }
       } else {
-        logMessage('warn', 'XML conversion failed:', beautifulJson.error);
+        logMessage('warn', '❌ XML conversion failed:', beautifulJson.error);
       }
 
-      // Forward beautiful JSON to n8n (only if successful conversion or errors)
+      // Forward to n8n
       await forwardToN8n(beautifulJson);
 
-      // Send throttled acknowledgment ONLY for real device messages
+      // Send acknowledgment
       if (config.devices.autoRespond && beautifulJson.success) {
         const now = Date.now();
         const lastResponseTime = connectionResponseTimes.get(clientIp) || 0;
         const timeSinceLastResponse = now - lastResponseTime;
         
         let shouldRespond = false;
-        
-        // Always respond to important events
         const eventType = beautifulJson.rawEventType || '';
+        
         if (config.devices.alwaysRespondToEvents.includes(eventType)) {
           shouldRespond = true;
-          logMessage('debug', `Responding to important event: ${eventType}`);
-        }
-        // Or respond if enough time has passed (throttle)
-        else if (timeSinceLastResponse >= config.devices.responseThrottleMs) {
+        } else if (timeSinceLastResponse >= config.devices.responseThrottleMs) {
           shouldRespond = true;
-          logMessage('debug', `Responding after throttle interval (${timeSinceLastResponse}ms)`);
         }
         
         if (shouldRespond) {
@@ -496,16 +532,15 @@ wss.on('connection', (ws, req) => {
             const protocolResponse = createProtocolResponse(beautifulJson, xmlData);
             ws.send(protocolResponse);
             connectionResponseTimes.set(clientIp, now);
-            logMessage('debug', `Sent protocol response to ${clientIp} for ${eventType}`);
+            if (eventType === 'TimeLog_v2') {
+              const transId = extractTransId(xmlData, beautifulJson);
+              logMessage('info', `✅ ACK: TimeLog_v2 confirmed (TransID: ${transId})`);
+            }
           } catch (responseError) {
             logMessage('error', `Failed to create protocol response: ${responseError.message}`);
-            // Fallback to simple response
             const fallbackResponse = createXmlResponse('Received', 'OK');
             ws.send(fallbackResponse);
-            logMessage('debug', `Sent fallback response to ${clientIp}`);
           }
-        } else {
-          logMessage('debug', `Throttled response (last: ${timeSinceLastResponse}ms ago)`);
         }
       }
 
