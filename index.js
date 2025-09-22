@@ -280,7 +280,7 @@ function createXmlResponse(event, status = 'OK') {
   return xmlBuilder.buildObject(response);
 }
 
-function createProtocolResponse(beautifulJson) {
+function createProtocolResponse(beautifulJson, originalXmlData) {
   const deviceSerial = beautifulJson.deviceInfo?.serialNumber || 'unknown';
   const eventType = beautifulJson.rawEventType;
   const timestamp = new Date().toISOString();
@@ -321,22 +321,26 @@ function createProtocolResponse(beautifulJson) {
     };
   }
   else if (eventType === 'TimeLog_v2') {
-    // Extract TransID if available, or generate one
-    const transId = extractTransId(beautifulJson) || generateTransId();
+    // Extract TransID from original XML - this is critical for device acknowledgment
+    const transId = extractTransId(originalXmlData, beautifulJson);
+    if (!transId) {
+      logMessage('warn', 'No TransID found in TimeLog_v2, device may retry');
+    }
     response = {
       Message: {
         Response: 'TimeLog_v2',
-        TransID: transId,
+        TransID: transId || generateTransId(),
         Result: 'OK'
       }
     };
+    logMessage('debug', `TimeLog_v2 response with TransID: ${transId || 'generated'}`);
   }
   else if (eventType === 'AdminLog_v2') {
-    const transId = extractTransId(beautifulJson) || generateTransId();
+    const transId = extractTransId(originalXmlData, beautifulJson);
     response = {
       Message: {
         Response: 'AdminLog_v2',
-        TransID: transId,
+        TransID: transId || generateTransId(),
         Result: 'OK'
       }
     };
@@ -369,12 +373,23 @@ function generateTransId() {
   return Math.random().toString(36).substr(2, 9);
 }
 
-function extractTransId(beautifulJson) {
-  // Try to extract TransID from raw XML if available
-  if (beautifulJson.rawXml && beautifulJson.rawXml.includes('<TransID>')) {
-    const match = beautifulJson.rawXml.match(/<TransID>(.*?)<\/TransID>/);
-    return match ? match[1] : null;
+function extractTransId(xmlData, beautifulJson) {
+  // First try to extract from the original XML data
+  if (xmlData && xmlData.includes('<TransID>')) {
+    const match = xmlData.match(/<TransID>(.*?)<\/TransID>/);
+    if (match && match[1]) {
+      return match[1];
+    }
   }
+  
+  // Fallback: try to extract from beautifulJson rawXml
+  if (beautifulJson && beautifulJson.rawXml && beautifulJson.rawXml.includes('<TransID>')) {
+    const match = beautifulJson.rawXml.match(/<TransID>(.*?)<\/TransID>/);
+    if (match && match[1]) {
+      return match[1];
+    }
+  }
+  
   return null;
 }
 
@@ -431,6 +446,11 @@ wss.on('connection', (ws, req) => {
       const connectionId = `${clientIp}-${Date.now()}`;
       const beautifulJson = await convertToBeautifulJson(xmlData, clientIp, connectionId);
       
+      // Ensure raw XML is included for TransID extraction
+      if (beautifulJson && beautifulJson.success) {
+        beautifulJson.rawXml = xmlData;
+      }
+      
       // If it's null, it means it's a server response - ignore it
       if (!beautifulJson) {
         logMessage('debug', 'Ignoring server response message');
@@ -473,7 +493,7 @@ wss.on('connection', (ws, req) => {
         
         if (shouldRespond) {
           try {
-            const protocolResponse = createProtocolResponse(beautifulJson);
+            const protocolResponse = createProtocolResponse(beautifulJson, xmlData);
             ws.send(protocolResponse);
             connectionResponseTimes.set(clientIp, now);
             logMessage('debug', `Sent protocol response to ${clientIp} for ${eventType}`);
