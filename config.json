@@ -27,7 +27,7 @@
     "keepAliveInterval": 30000,
     "forwardKeepAlive": false,
     "responseThrottleMs": 120000,
-    "alwaysRespondToEvents": ["Registration", "Login", "TimeLog_v2"]
+    "alwaysRespondToEvents": ["Registration", "Register", "Login", "TimeLog_v2"]
   },
   "security": {
     "allowedIPs": [],
