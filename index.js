@@ -280,6 +280,105 @@ function createXmlResponse(event, status = 'OK') {
   return xmlBuilder.buildObject(response);
 }
 
+function createProtocolResponse(beautifulJson) {
+  const deviceSerial = beautifulJson.deviceInfo?.serialNumber || 'unknown';
+  const eventType = beautifulJson.rawEventType;
+  const timestamp = new Date().toISOString();
+  
+  let response = {};
+  
+  // Build response based on event type following protocol
+  if (eventType === 'Register') {
+    // Generate a token for the device (in production, store this)
+    const token = generateDeviceToken(deviceSerial);
+    response = {
+      Message: {
+        Response: 'Register',
+        DeviceSerialNo: deviceSerial,
+        Token: token,
+        Result: 'OK'
+      }
+    };
+  } 
+  else if (eventType === 'Login') {
+    response = {
+      Message: {
+        Response: 'Login',
+        DeviceSerialNo: deviceSerial,
+        Result: 'OK'
+      }
+    };
+  }
+  else if (eventType === 'KeepAlive') {
+    const deviceTime = beautifulJson.eventData?.device?.lastSeen || timestamp;
+    response = {
+      Message: {
+        Response: 'KeepAlive',
+        Result: 'OK',
+        DevTime: deviceTime,
+        ServerTime: timestamp
+      }
+    };
+  }
+  else if (eventType === 'TimeLog_v2') {
+    // Extract TransID if available, or generate one
+    const transId = extractTransId(beautifulJson) || generateTransId();
+    response = {
+      Message: {
+        Response: 'TimeLog_v2',
+        TransID: transId,
+        Result: 'OK'
+      }
+    };
+  }
+  else if (eventType === 'AdminLog_v2') {
+    const transId = extractTransId(beautifulJson) || generateTransId();
+    response = {
+      Message: {
+        Response: 'AdminLog_v2',
+        TransID: transId,
+        Result: 'OK'
+      }
+    };
+  }
+  else {
+    // Generic response for unknown events
+    response = {
+      Message: {
+        Response: eventType,
+        Result: 'OK',
+        ServerTime: timestamp
+      }
+    };
+  }
+  
+  const xmlBuilder = new xml2js.Builder({ 
+    rootName: null, 
+    headless: true,
+    renderOpts: { pretty: false }
+  });
+  
+  return xmlBuilder.buildObject(response);
+}
+
+function generateDeviceToken(deviceSerial) {
+  // Generate a UUID-like token for the device
+  return `${deviceSerial}-${Date.now()}-${Math.random().toString(36).substr(2, 8)}`;
+}
+
+function generateTransId() {
+  return Math.random().toString(36).substr(2, 9);
+}
+
+function extractTransId(beautifulJson) {
+  // Try to extract TransID from raw XML if available
+  if (beautifulJson.rawXml && beautifulJson.rawXml.includes('<TransID>')) {
+    const match = beautifulJson.rawXml.match(/<TransID>(.*?)<\/TransID>/);
+    return match ? match[1] : null;
+  }
+  return null;
+}
+
 async function forwardToN8n(data) {
   let retries = 0;
   
@@ -374,10 +473,10 @@ wss.on('connection', (ws, req) => {
         }
         
         if (shouldRespond) {
-          const xmlResponse = createXmlResponse('Received', 'OK');
-          ws.send(xmlResponse);
+          const protocolResponse = createProtocolResponse(beautifulJson);
+          ws.send(protocolResponse);
           connectionResponseTimes.set(clientIp, now);
-          logMessage('debug', `Sent acknowledgment to ${clientIp}`);
+          logMessage('debug', `Sent protocol response to ${clientIp} for ${eventType}`);
         } else {
           logMessage('debug', `Throttled response (last: ${timeSinceLastResponse}ms ago)`);
         }
@@ -406,7 +505,9 @@ wss.on('connection', (ws, req) => {
   if (config.devices.autoRespond) {
     const now = Date.now();
     connectionResponseTimes.set(clientIp, now);
-    ws.send(createXmlResponse('Welcome', 'Connected'));
+    // Send a simple welcome - device will send Register request next
+    const welcomeResponse = createXmlResponse('Welcome', 'Connected');
+    ws.send(welcomeResponse);
     logMessage('debug', `Sent welcome message to ${clientIp}`);
   }
 });
