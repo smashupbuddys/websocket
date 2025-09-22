@@ -10,7 +10,7 @@
     }
   },
   "n8n": {
-    "webhookUrl": "https://n8n.jwls.co/webhook-test/biometric",
+    "webhookUrl": "https://n8n.jwls.co/webhook/biometric",
     "timeout": 5000,
     "retries": 3,
     "retryDelay": 1000
@@ -25,7 +25,9 @@
     "autoRespond": true,
     "responseFormat": "xml",
     "keepAliveInterval": 30000,
-    "forwardKeepAlive": false
+    "forwardKeepAlive": false,
+    "responseThrottleMs": 120000,
+    "alwaysRespondToEvents": ["Registration", "Login", "TimeLog_v2"]
   },
   "security": {
     "allowedIPs": [],

@@ -40,6 +40,9 @@ const N8N_WEBHOOK_URL = config.n8n.webhookUrl;
 const xmlParser = new xml2js.Parser({ explicitArray: false });
 const xmlBuilder = new xml2js.Builder({ rootName: 'Response', headless: true });
 
+// Track last response time per connection
+const connectionResponseTimes = new Map();
+
 const wss = new WebSocket.Server({ port: PORT });
 
 logMessage('info', `WebSocket server listening on ${config.server.host}:${PORT}`);
@@ -201,24 +204,56 @@ wss.on('connection', (ws, req) => {
       };
 
       // Try to extract basic info for logging (optional)
+      let shouldForward = true;
       try {
         const basicInfo = await convertXmlToJson(xmlData);
         if (basicInfo) {
           payload.parsedInfo = basicInfo;
           logMessage('info', `Parsed info:`, basicInfo);
+        } else {
+          // This means it's a Response message - don't forward
+          shouldForward = false;
+          logMessage('debug', 'Skipping forward of server response message');
         }
       } catch (parseError) {
         logMessage('debug', 'Could not parse XML, sending raw data anyway');
       }
 
-      // Always forward to n8n (let n8n handle all processing)
-      await forwardToN8n(payload);
+      // Only forward actual device messages, not server responses
+      if (shouldForward) {
+        await forwardToN8n(payload);
+      }
 
-      // Send simple acknowledgment
-      if (config.devices.autoRespond) {
-        const xmlResponse = createXmlResponse('Received', 'OK');
-        ws.send(xmlResponse);
-        logMessage('debug', `Sent acknowledgment`);
+      // Send throttled acknowledgment ONLY for real device messages
+      if (config.devices.autoRespond && shouldForward) {
+        const now = Date.now();
+        const lastResponseTime = connectionResponseTimes.get(clientIp) || 0;
+        const timeSinceLastResponse = now - lastResponseTime;
+        
+        let shouldRespond = false;
+        
+        // Always respond to important events
+        if (payload.parsedInfo) {
+          const eventType = payload.parsedInfo.rawEvent || '';
+          if (config.devices.alwaysRespondToEvents.includes(eventType)) {
+            shouldRespond = true;
+            logMessage('debug', `Responding to important event: ${eventType}`);
+          }
+          // Or respond if enough time has passed (throttle)
+          else if (timeSinceLastResponse >= config.devices.responseThrottleMs) {
+            shouldRespond = true;
+            logMessage('debug', `Responding after throttle interval (${timeSinceLastResponse}ms)`);
+          }
+        }
+        
+        if (shouldRespond) {
+          const xmlResponse = createXmlResponse('Received', 'OK');
+          ws.send(xmlResponse);
+          connectionResponseTimes.set(clientIp, now);
+          logMessage('debug', `Sent acknowledgment to ${clientIp}`);
+        } else {
+          logMessage('debug', `Throttled response (last: ${timeSinceLastResponse}ms ago)`);
+        }
       }
 
     } catch (error) {
@@ -231,14 +266,21 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', () => {
     logMessage('info', `Connection closed from ${clientIp}`);
+    // Clean up response tracking for this connection
+    connectionResponseTimes.delete(clientIp);
   });
 
   ws.on('error', (error) => {
     logMessage('error', `WebSocket error from ${clientIp}:`, error.message);
+    // Clean up response tracking for this connection
+    connectionResponseTimes.delete(clientIp);
   });
 
   if (config.devices.autoRespond) {
+    const now = Date.now();
+    connectionResponseTimes.set(clientIp, now);
     ws.send(createXmlResponse('Welcome', 'Connected'));
+    logMessage('debug', `Sent welcome message to ${clientIp}`);
   }
 });
 
