@@ -1,0 +1,21 @@
+{
+  "name": "biometric-websocket-bridge",
+  "version": "1.0.0",
+  "description": "WebSocket bridge for biometric devices to n8n webhook",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0",
+    "axios": "^1.7.7",
+    "xml2js": "^0.6.2"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": ["websocket", "biometric", "bridge", "n8n"],
+  "author": "",
+  "license": "MIT"
+}

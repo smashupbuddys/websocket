@@ -1,0 +1,45 @@
+{
+  "server": {
+    "port": 8001,
+    "host": "0.0.0.0",
+    "subdomain": "",
+    "ssl": {
+      "enabled": false,
+      "cert": "",
+      "key": ""
+    }
+  },
+  "n8n": {
+    "webhookUrl": "http://localhost:5678/webhook/biometric",
+    "timeout": 5000,
+    "retries": 3,
+    "retryDelay": 1000
+  },
+  "logging": {
+    "level": "info",
+    "enableConsole": true,
+    "enableFile": false,
+    "logFile": "logs/biometric-bridge.log"
+  },
+  "devices": {
+    "autoRespond": true,
+    "responseFormat": "xml",
+    "keepAliveInterval": 30000,
+    "forwardKeepAlive": false
+  },
+  "security": {
+    "allowedIPs": [],
+    "requireAuth": false,
+    "authToken": ""
+  },
+  "conversion": {
+    "timestampFormat": "ISO",
+    "includeRawXml": false,
+    "customEventMapping": {
+      "TimeLog_v2": "attendance",
+      "Registration": "registration",
+      "Login": "login",
+      "KeepAlive": "keepalive"
+    }
+  }
+}

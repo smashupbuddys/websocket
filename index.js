@@ -1,0 +1,242 @@
+const WebSocket = require('ws');
+const axios = require('axios');
+const xml2js = require('xml2js');
+const fs = require('fs');
+const path = require('path');
+
+function loadConfig() {
+  try {
+    const configPath = path.join(__dirname, 'config.json');
+    const configData = fs.readFileSync(configPath, 'utf8');
+    const config = JSON.parse(configData);
+    
+    config.server.port = process.env.PORT || config.server.port;
+    config.n8n.webhookUrl = process.env.N8N_WEBHOOK_URL || config.n8n.webhookUrl;
+    
+    return config;
+  } catch (error) {
+    console.error('Error loading config:', error.message);
+    console.log('Using default configuration...');
+    return {
+      server: { port: 8001, host: '0.0.0.0' },
+      n8n: { webhookUrl: 'http://localhost:5678/webhook/biometric', timeout: 5000, retries: 3 },
+      logging: { level: 'info', enableConsole: true },
+      devices: { autoRespond: true, forwardKeepAlive: false },
+      security: { allowedIPs: [], requireAuth: false },
+      conversion: { customEventMapping: {
+        'TimeLog_v2': 'attendance',
+        'Registration': 'registration', 
+        'Login': 'login',
+        'KeepAlive': 'keepalive'
+      }}
+    };
+  }
+}
+
+const config = loadConfig();
+const PORT = config.server.port;
+const N8N_WEBHOOK_URL = config.n8n.webhookUrl;
+
+const xmlParser = new xml2js.Parser({ explicitArray: false });
+const xmlBuilder = new xml2js.Builder({ rootName: 'Response', headless: true });
+
+const wss = new WebSocket.Server({ port: PORT });
+
+logMessage('info', `WebSocket server listening on ${config.server.host}:${PORT}`);
+logMessage('info', `N8N webhook URL: ${N8N_WEBHOOK_URL}`);
+logMessage('info', `Configuration loaded successfully`);
+if (config.server.subdomain) {
+  logMessage('info', `Subdomain configured: ${config.server.subdomain}`);
+}
+
+function convertXmlToJson(xmlData) {
+  return new Promise((resolve, reject) => {
+    xmlParser.parseString(xmlData, (err, result) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+
+      const message = result.Message;
+      if (!message) {
+        resolve(null);
+        return;
+      }
+
+      const jsonData = {
+        event: getEventType(message.Event),
+        deviceId: message.DeviceSerialNo || 'unknown',
+        userId: message.UserID || null,
+        timestamp: message.Time || new Date().toISOString(),
+        action: message.Action || null,
+        rawEvent: message.Event
+      };
+      
+      if (config.conversion.includeRawXml) {
+        jsonData.rawXml = xmlData;
+      }
+
+      resolve(jsonData);
+    });
+  });
+}
+
+function getEventType(event) {
+  return config.conversion.customEventMapping[event] || 'unknown';
+}
+
+function isAllowedIP(clientIp) {
+  if (!config.security.allowedIPs || config.security.allowedIPs.length === 0) {
+    return true;
+  }
+  
+  const normalizedIp = clientIp.replace(/^::ffff:/, '');
+  
+  return config.security.allowedIPs.some(allowedRange => {
+    if (allowedRange.includes('/')) {
+      return isIpInRange(normalizedIp, allowedRange);
+    }
+    return normalizedIp === allowedRange;
+  });
+}
+
+function isIpInRange(ip, range) {
+  const [rangeIp, prefixLength] = range.split('/');
+  const ipParts = ip.split('.').map(Number);
+  const rangeIpParts = rangeIp.split('.').map(Number);
+  const prefix = parseInt(prefixLength);
+  
+  const ipInt = (ipParts[0] << 24) + (ipParts[1] << 16) + (ipParts[2] << 8) + ipParts[3];
+  const rangeInt = (rangeIpParts[0] << 24) + (rangeIpParts[1] << 16) + (rangeIpParts[2] << 8) + rangeIpParts[3];
+  const mask = (-1 << (32 - prefix)) >>> 0;
+  
+  return (ipInt & mask) === (rangeInt & mask);
+}
+
+function logMessage(level, message, data = null) {
+  if (!config.logging.enableConsole) return;
+  
+  const timestamp = new Date().toISOString();
+  const logEntry = data ? `[${timestamp}] ${level.toUpperCase()}: ${message} ${JSON.stringify(data)}` : `[${timestamp}] ${level.toUpperCase()}: ${message}`;
+  
+  console.log(logEntry);
+}
+
+function createXmlResponse(event, status = 'OK') {
+  const response = {
+    Event: event,
+    Status: status,
+    Timestamp: new Date().toISOString()
+  };
+  return xmlBuilder.buildObject(response);
+}
+
+async function forwardToN8n(data) {
+  let retries = 0;
+  
+  while (retries <= config.n8n.retries) {
+    try {
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+      
+      if (config.security.requireAuth && config.security.authToken) {
+        headers['Authorization'] = `Bearer ${config.security.authToken}`;
+      }
+      
+      const response = await axios.post(N8N_WEBHOOK_URL, data, {
+        headers,
+        timeout: config.n8n.timeout
+      });
+      
+      logMessage('info', '✓ Forwarded to n8n:', data);
+      return true;
+    } catch (error) {
+      retries++;
+      logMessage('error', `✗ Failed to forward to n8n (attempt ${retries}/${config.n8n.retries + 1}):`, error.message);
+      
+      if (retries <= config.n8n.retries) {
+        await new Promise(resolve => setTimeout(resolve, config.n8n.retryDelay));
+      }
+    }
+  }
+  
+  return false;
+}
+
+wss.on('connection', (ws, req) => {
+  const clientIp = req.socket.remoteAddress;
+  
+  if (!isAllowedIP(clientIp)) {
+    logMessage('warn', `Connection rejected from unauthorized IP: ${clientIp}`);
+    ws.close(1008, 'Unauthorized IP');
+    return;
+  }
+  
+  logMessage('info', `New connection from ${clientIp}`);
+
+  ws.on('message', async (data) => {
+    try {
+      const xmlData = data.toString();
+      logMessage('debug', `Received XML:`, xmlData);
+
+      const jsonData = await convertXmlToJson(xmlData);
+      
+      if (!jsonData) {
+        logMessage('warn', 'Invalid XML format received');
+        if (config.devices.autoRespond) {
+          ws.send(createXmlResponse('Error', 'Invalid XML format'));
+        }
+        return;
+      }
+
+      logMessage('info', `Converted to JSON:`, jsonData);
+
+      if (jsonData.event !== 'keepalive' || config.devices.forwardKeepAlive) {
+        await forwardToN8n(jsonData);
+      }
+
+      if (config.devices.autoRespond) {
+        const xmlResponse = createXmlResponse(jsonData.rawEvent, 'OK');
+        ws.send(xmlResponse);
+        logMessage('debug', `Sent XML response:`, xmlResponse);
+      }
+
+    } catch (error) {
+      logMessage('error', 'Error processing message:', error.message);
+      if (config.devices.autoRespond) {
+        ws.send(createXmlResponse('Error', 'Processing failed'));
+      }
+    }
+  });
+
+  ws.on('close', () => {
+    logMessage('info', `Connection closed from ${clientIp}`);
+  });
+
+  ws.on('error', (error) => {
+    logMessage('error', `WebSocket error from ${clientIp}:`, error.message);
+  });
+
+  if (config.devices.autoRespond) {
+    ws.send(createXmlResponse('Welcome', 'Connected'));
+  }
+});
+
+wss.on('error', (error) => {
+  logMessage('error', 'WebSocket server error:', error.message);
+});
+
+process.on('SIGTERM', () => {
+  logMessage('info', 'Received SIGTERM, closing server...');
+  wss.close(() => {
+    process.exit(0);
+  });
+});
+
+process.on('SIGINT', () => {
+  logMessage('info', 'Received SIGINT, closing server...');
+  wss.close(() => {
+    process.exit(0);
+  });
+});

@@ -1,0 +1,46 @@
+{
+  "server": {
+    "port": 8001,
+    "host": "0.0.0.0",
+    "subdomain": "biometric.yourdomain.com",
+    "ssl": {
+      "enabled": false,
+      "cert": "/path/to/certificate.crt",
+      "key": "/path/to/private.key"
+    }
+  },
+  "n8n": {
+    "webhookUrl": "https://your-n8n-instance.com/webhook/biometric",
+    "timeout": 5000,
+    "retries": 3,
+    "retryDelay": 1000
+  },
+  "logging": {
+    "level": "info",
+    "enableConsole": true,
+    "enableFile": true,
+    "logFile": "logs/biometric-bridge.log"
+  },
+  "devices": {
+    "autoRespond": true,
+    "responseFormat": "xml",
+    "keepAliveInterval": 30000,
+    "forwardKeepAlive": false
+  },
+  "security": {
+    "allowedIPs": ["192.168.1.0/24", "10.0.0.0/8"],
+    "requireAuth": true,
+    "authToken": "your-secret-token-here"
+  },
+  "conversion": {
+    "timestampFormat": "ISO",
+    "includeRawXml": true,
+    "customEventMapping": {
+      "TimeLog_v2": "attendance",
+      "Registration": "device_registration",
+      "Login": "device_login",
+      "KeepAlive": "heartbeat",
+      "CustomEvent": "custom_event"
+    }
+  }
+}
