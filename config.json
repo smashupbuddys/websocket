@@ -10,7 +10,7 @@
     }
   },
   "n8n": {
-    "webhookUrl": "http://localhost:5678/webhook/biometric",
+    "webhookUrl": "https://n8n.jwls.co/webhook-test/biometric",
     "timeout": 5000,
     "retries": 3,
     "retryDelay": 1000

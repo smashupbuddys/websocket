@@ -57,6 +57,13 @@ function convertXmlToJson(xmlData) {
         return;
       }
 
+      // Check if this is a Response message (our own server response)
+      if (result.Response) {
+        logMessage('debug', 'Ignoring server response message');
+        resolve(null);
+        return;
+      }
+
       const message = result.Message;
       if (!message) {
         resolve(null);
@@ -178,28 +185,40 @@ wss.on('connection', (ws, req) => {
   ws.on('message', async (data) => {
     try {
       const xmlData = data.toString();
-      logMessage('debug', `Received XML:`, xmlData);
+      logMessage('info', `Received raw XML:`, xmlData);
 
-      const jsonData = await convertXmlToJson(xmlData);
-      
-      if (!jsonData) {
-        logMessage('warn', 'Invalid XML format received');
-        if (config.devices.autoRespond) {
-          ws.send(createXmlResponse('Error', 'Invalid XML format'));
+      // Create payload with raw XML and metadata
+      const payload = {
+        rawXml: xmlData,
+        timestamp: new Date().toISOString(),
+        deviceIP: clientIp,
+        messageLength: xmlData.length,
+        connectionId: `${clientIp}-${Date.now()}`,
+        serverInfo: {
+          port: config.server.port,
+          subdomain: config.server.subdomain || null
         }
-        return;
+      };
+
+      // Try to extract basic info for logging (optional)
+      try {
+        const basicInfo = await convertXmlToJson(xmlData);
+        if (basicInfo) {
+          payload.parsedInfo = basicInfo;
+          logMessage('info', `Parsed info:`, basicInfo);
+        }
+      } catch (parseError) {
+        logMessage('debug', 'Could not parse XML, sending raw data anyway');
       }
 
-      logMessage('info', `Converted to JSON:`, jsonData);
+      // Always forward to n8n (let n8n handle all processing)
+      await forwardToN8n(payload);
 
-      if (jsonData.event !== 'keepalive' || config.devices.forwardKeepAlive) {
-        await forwardToN8n(jsonData);
-      }
-
+      // Send simple acknowledgment
       if (config.devices.autoRespond) {
-        const xmlResponse = createXmlResponse(jsonData.rawEvent, 'OK');
+        const xmlResponse = createXmlResponse('Received', 'OK');
         ws.send(xmlResponse);
-        logMessage('debug', `Sent XML response:`, xmlResponse);
+        logMessage('debug', `Sent acknowledgment`);
       }
 
     } catch (error) {
