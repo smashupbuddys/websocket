@@ -73,13 +73,16 @@ function convertXmlToJson(xmlData) {
         return;
       }
 
+      // Determine the event type from either Event or Request field
+      const eventKey = message.Event || message.Request || 'unknown';
+      
       const jsonData = {
-        event: getEventType(message.Event),
+        event: getEventType(eventKey),
         deviceId: message.DeviceSerialNo || 'unknown',
         userId: message.UserID || null,
         timestamp: message.Time || new Date().toISOString(),
         action: message.Action || null,
-        rawEvent: message.Event
+        rawEvent: eventKey
       };
       
       if (config.conversion.includeRawXml) {
@@ -93,6 +96,142 @@ function convertXmlToJson(xmlData) {
 
 function getEventType(event) {
   return config.conversion.customEventMapping[event] || 'unknown';
+}
+
+function convertToBeautifulJson(xmlData, deviceIP, connectionId) {
+  return new Promise((resolve, reject) => {
+    xmlParser.parseString(xmlData, (err, result) => {
+      if (err) {
+        resolve({
+          success: false,
+          error: "XML parsing failed",
+          errorMessage: err.message,
+          rawXml: xmlData,
+          deviceIP: deviceIP,
+          connectionId: connectionId,
+          timestamp: new Date().toISOString()
+        });
+        return;
+      }
+
+      // Check if this is a Response message (ignore)
+      if (result.Response) {
+        resolve(null);
+        return;
+      }
+
+      const timestamp = new Date().toISOString();
+      let beautifulJson = {
+        success: true,
+        timestamp: timestamp,
+        deviceIP: deviceIP,
+        connectionId: connectionId,
+        messageLength: xmlData.length
+      };
+
+      if (result.Message) {
+        const msg = result.Message;
+        const eventKey = msg.Event || msg.Request || 'unknown';
+        const eventType = getEventType(eventKey);
+
+        // Base message info
+        beautifulJson.messageType = eventType;
+        beautifulJson.rawEventType = eventKey;
+        beautifulJson.deviceInfo = {
+          serialNumber: msg.DeviceSerialNo || 'unknown',
+          terminalType: msg.TerminalType || null,
+          productName: msg.ProductName || null,
+          cloudId: msg.CloudId || null
+        };
+
+        // Event-specific data formatting
+        if (eventType === 'registration') {
+          beautifulJson.eventData = {
+            type: 'device_registration',
+            device: {
+              serialNumber: msg.DeviceSerialNo,
+              terminalType: msg.TerminalType,
+              productName: msg.ProductName,
+              cloudId: msg.CloudId
+            },
+            requestType: msg.Request,
+            registeredAt: timestamp
+          };
+        }
+        
+        else if (eventType === 'attendance') {
+          beautifulJson.eventData = {
+            type: 'time_log',
+            employee: {
+              userId: msg.UserID,
+              action: msg.Action,
+              verifyMode: msg.VerifyMode || null,
+              workCode: msg.WorkCode || null
+            },
+            timing: {
+              eventTime: msg.Time || timestamp,
+              processedTime: timestamp
+            },
+            device: {
+              serialNumber: msg.DeviceSerialNo
+            }
+          };
+        }
+        
+        else if (eventType === 'login') {
+          beautifulJson.eventData = {
+            type: 'device_login',
+            session: {
+              userId: msg.UserID || null,
+              loginTime: msg.Time || timestamp,
+              device: {
+                serialNumber: msg.DeviceSerialNo
+              }
+            }
+          };
+        }
+        
+        else if (eventType === 'keepalive') {
+          beautifulJson.eventData = {
+            type: 'heartbeat',
+            device: {
+              serialNumber: msg.DeviceSerialNo,
+              lastSeen: msg.Time || timestamp
+            },
+            status: 'online'
+          };
+        }
+        
+        else {
+          // Unknown event - include all data in a structured way
+          beautifulJson.eventData = {
+            type: 'unknown_event',
+            rawData: msg,
+            allFields: Object.keys(msg)
+          };
+        }
+
+        // Always include metadata
+        beautifulJson.metadata = {
+          originalEvent: eventKey,
+          processedAt: timestamp,
+          xmlLength: xmlData.length,
+          hasUserData: !!(msg.UserID),
+          hasTimeData: !!(msg.Time)
+        };
+
+      } else {
+        // Not a Message format
+        beautifulJson.messageType = 'other';
+        beautifulJson.eventData = {
+          type: 'unknown_format',
+          rawData: result
+        };
+      }
+
+      resolve(beautifulJson);
+    });
+  });
 }
 
 function isAllowedIP(clientIp) {
@@ -190,42 +329,32 @@ wss.on('connection', (ws, req) => {
       const xmlData = data.toString();
       logMessage('info', `Received raw XML:`, xmlData);
 
-      // Create payload with raw XML and metadata
-      const payload = {
-        rawXml: xmlData,
-        timestamp: new Date().toISOString(),
-        deviceIP: clientIp,
-        messageLength: xmlData.length,
-        connectionId: `${clientIp}-${Date.now()}`,
-        serverInfo: {
-          port: config.server.port,
-          subdomain: config.server.subdomain || null
-        }
-      };
-
-      // Try to extract basic info for logging (optional)
-      let shouldForward = true;
-      try {
-        const basicInfo = await convertXmlToJson(xmlData);
-        if (basicInfo) {
-          payload.parsedInfo = basicInfo;
-          logMessage('info', `Parsed info:`, basicInfo);
-        } else {
-          // This means it's a Response message - don't forward
-          shouldForward = false;
-          logMessage('debug', 'Skipping forward of server response message');
-        }
-      } catch (parseError) {
-        logMessage('debug', 'Could not parse XML, sending raw data anyway');
+      // Convert XML to beautiful JSON format
+      const connectionId = `${clientIp}-${Date.now()}`;
+      const beautifulJson = await convertToBeautifulJson(xmlData, clientIp, connectionId);
+      
+      // If it's null, it means it's a server response - ignore it
+      if (!beautifulJson) {
+        logMessage('debug', 'Ignoring server response message');
+        return;
       }
 
-      // Only forward actual device messages, not server responses
-      if (shouldForward) {
-        await forwardToN8n(payload);
+      // Log the beautiful conversion
+      if (beautifulJson.success) {
+        logMessage('info', `Converted to beautiful JSON:`, {
+          messageType: beautifulJson.messageType,
+          deviceId: beautifulJson.deviceInfo?.serialNumber,
+          eventType: beautifulJson.eventData?.type
+        });
+      } else {
+        logMessage('warn', 'XML conversion failed:', beautifulJson.error);
       }
+
+      // Forward beautiful JSON to n8n (only if successful conversion or errors)
+      await forwardToN8n(beautifulJson);
 
       // Send throttled acknowledgment ONLY for real device messages
-      if (config.devices.autoRespond && shouldForward) {
+      if (config.devices.autoRespond && beautifulJson.success) {
         const now = Date.now();
         const lastResponseTime = connectionResponseTimes.get(clientIp) || 0;
         const timeSinceLastResponse = now - lastResponseTime;
@@ -233,17 +362,15 @@ wss.on('connection', (ws, req) => {
         let shouldRespond = false;
         
         // Always respond to important events
-        if (payload.parsedInfo) {
-          const eventType = payload.parsedInfo.rawEvent || '';
-          if (config.devices.alwaysRespondToEvents.includes(eventType)) {
-            shouldRespond = true;
-            logMessage('debug', `Responding to important event: ${eventType}`);
-          }
-          // Or respond if enough time has passed (throttle)
-          else if (timeSinceLastResponse >= config.devices.responseThrottleMs) {
-            shouldRespond = true;
-            logMessage('debug', `Responding after throttle interval (${timeSinceLastResponse}ms)`);
-          }
+        const eventType = beautifulJson.rawEventType || '';
+        if (config.devices.alwaysRespondToEvents.includes(eventType)) {
+          shouldRespond = true;
+          logMessage('debug', `Responding to important event: ${eventType}`);
+        }
+        // Or respond if enough time has passed (throttle)
+        else if (timeSinceLastResponse >= config.devices.responseThrottleMs) {
+          shouldRespond = true;
+          logMessage('debug', `Responding after throttle interval (${timeSinceLastResponse}ms)`);
         }
         
         if (shouldRespond) {

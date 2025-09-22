@@ -39,7 +39,8 @@
     "includeRawXml": false,
     "customEventMapping": {
       "TimeLog_v2": "attendance",
-      "Registration": "registration",
+      "Registration": "registration", 
+      "Register": "registration",
       "Login": "login",
       "KeepAlive": "keepalive"
     }

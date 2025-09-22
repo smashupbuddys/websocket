@@ -1,0 +1,283 @@
+{
+  "name": "Biometric XML to JSON Converter",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "biometric",
+        "responseMode": "onReceived",
+        "responseCode": 200,
+        "responseData": "{ \"status\": \"received\" }"
+      },
+      "id": "webhook-node",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "webhookId": "biometric"
+    },
+    {
+      "parameters": {
+        "functionCode": "// Get the raw XML from the webhook payload\nconst rawXml = $json.rawXml;\nconst deviceIP = $json.deviceIP;\nconst timestamp = $json.timestamp;\nconst connectionId = $json.connectionId;\n\nif (!rawXml) {\n  return [{ error: \"No XML data found\", timestamp: new Date().toISOString() }];\n}\n\n// Parse XML to extract meaningful data\nconst xml2js = require('xml2js');\nconst parser = new xml2js.Parser({ explicitArray: false });\n\nreturn new Promise((resolve, reject) => {\n  parser.parseString(rawXml, (err, result) => {\n    if (err) {\n      resolve([{\n        error: \"XML parsing failed\",\n        errorMessage: err.message,\n        rawXml: rawXml,\n        deviceIP: deviceIP,\n        timestamp: timestamp,\n        connectionId: connectionId\n      }]);\n      return;\n    }\n\n    // Extract data based on message type\n    let output = {\n      deviceIP: deviceIP,\n      timestamp: timestamp,\n      connectionId: connectionId,\n      messageType: \"unknown\",\n      data: {},\n      processedAt: new Date().toISOString()\n    };\n\n    if (result.Message) {\n      const msg = result.Message;\n      \n      // Registration message\n      if (msg.Request === \"Register\") {\n        output.messageType = \"registration\";\n        output.data = {\n          deviceSerialNo: msg.DeviceSerialNo,\n          terminalType: msg.TerminalType,\n          productName: msg.ProductName,\n          cloudId: msg.CloudId,\n          request: msg.Request\n        };\n      }\n      \n      // Time log (attendance) message\n      else if (msg.Event === \"TimeLog_v2\") {\n        output.messageType = \"attendance\";\n        output.data = {\n          userId: msg.UserID,\n          deviceSerialNo: msg.DeviceSerialNo,\n          action: msg.Action,\n          time: msg.Time,\n          event: msg.Event,\n          verifyMode: msg.VerifyMode || null,\n          workCode: msg.WorkCode || null\n        };\n      }\n      \n      // Login message\n      else if (msg.Event === \"Login\") {\n        output.messageType = \"login\";\n        output.data = {\n          deviceSerialNo: msg.DeviceSerialNo,\n          userId: msg.UserID || null,\n          time: msg.Time,\n          event: msg.Event\n        };\n      }\n      \n      // Keep alive\n      else if (msg.Event === \"KeepAlive\") {\n        output.messageType = \"keepalive\";\n        output.data = {\n          deviceSerialNo: msg.DeviceSerialNo,\n          time: msg.Time,\n          event: msg.Event\n        };\n      }\n      \n      // Other events\n      else if (msg.Event) {\n        output.messageType = \"event\";\n        output.data = {\n          event: msg.Event,\n          deviceSerialNo: msg.DeviceSerialNo,\n          time: msg.Time,\n          ...msg\n        };\n      }\n      \n      // Unknown message type - include all fields\n      else {\n        output.messageType = \"unknown\";\n        output.data = msg;\n      }\n      \n    } else if (result.Response) {\n      // Server response message - usually not needed\n      output.messageType = \"response\";\n      output.data = result.Response;\n    } else {\n      // Not a standard format\n      output.messageType = \"other\";\n      output.data = result;\n    }\n\n    // Always include raw XML for debugging if needed\n    output.rawXml = rawXml;\n\n    resolve([output]);\n  });\n});"
+      },
+      "id": "xml-parser",
+      "name": "Parse XML to JSON",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.messageType}}",
+              "operation": "equal",
+              "value2": "attendance"
+            }
+          ]
+        }
+      },
+      "id": "switch-attendance",
+      "name": "Is Attendance?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [680, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.messageType}}",
+              "operation": "equal",
+              "value2": "registration"
+            }
+          ]
+        }
+      },
+      "id": "switch-registration",
+      "name": "Is Registration?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [680, 350]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.messageType}}",
+              "operation": "equal",
+              "value2": "login"
+            }
+          ]
+        }
+      },
+      "id": "switch-login",
+      "name": "Is Login?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [680, 500]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Process Attendance Data\nreturn {\n  event_type: \"attendance\",\n  user_id: $json.data.userId,\n  device_id: $json.data.deviceSerialNo,\n  action: $json.data.action,\n  verify_mode: $json.data.verifyMode,\n  work_code: $json.data.workCode,\n  timestamp: $json.data.time || $json.timestamp,\n  device_ip: $json.deviceIP,\n  connection_id: $json.connectionId,\n  processed_at: $json.processedAt,\n  raw_event: $json.data.event\n};"
+      },
+      "id": "process-attendance",
+      "name": "Process Attendance",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [900, 120]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Process Registration Data\nreturn {\n  event_type: \"device_registration\",\n  device_id: $json.data.deviceSerialNo,\n  device_type: $json.data.terminalType,\n  product_name: $json.data.productName,\n  cloud_id: $json.data.cloudId,\n  request_type: $json.data.request,\n  device_ip: $json.deviceIP,\n  connection_id: $json.connectionId,\n  registered_at: $json.timestamp,\n  processed_at: $json.processedAt\n};"
+      },
+      "id": "process-registration",
+      "name": "Process Registration",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [900, 270]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Process Login Data\nreturn {\n  event_type: \"device_login\",\n  user_id: $json.data.userId,\n  device_id: $json.data.deviceSerialNo,\n  timestamp: $json.data.time || $json.timestamp,\n  device_ip: $json.deviceIP,\n  connection_id: $json.connectionId,\n  processed_at: $json.processedAt,\n  raw_event: $json.data.event\n};"
+      },
+      "id": "process-login",
+      "name": "Process Login",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [900, 420]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Log all processed data for debugging\nconsole.log('Biometric Event Processed:', JSON.stringify($json, null, 2));\nreturn $json;"
+      },
+      "id": "debug-logger",
+      "name": "Debug Logger",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.messageType}}",
+              "operation": "equal",
+              "value2": "keepalive"
+            }
+          ]
+        }
+      },
+      "id": "switch-keepalive",
+      "name": "Is KeepAlive?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [680, 650]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Process KeepAlive (optional - usually just log)\nreturn {\n  event_type: \"keepalive\",\n  device_id: $json.data.deviceSerialNo,\n  timestamp: $json.data.time || $json.timestamp,\n  device_ip: $json.deviceIP,\n  connection_id: $json.connectionId,\n  processed_at: $json.processedAt\n};"
+      },
+      "id": "process-keepalive",
+      "name": "Process KeepAlive",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [900, 570]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Parse XML to JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse XML to JSON": {
+      "main": [
+        [
+          {
+            "node": "Is Attendance?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Is Registration?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Is Login?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Is KeepAlive?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Attendance?": {
+      "main": [
+        [
+          {
+            "node": "Process Attendance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Registration?": {
+      "main": [
+        [
+          {
+            "node": "Process Registration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Login?": {
+      "main": [
+        [
+          {
+            "node": "Process Login",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is KeepAlive?": {
+      "main": [
+        [
+          {
+            "node": "Process KeepAlive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Attendance": {
+      "main": [
+        [
+          {
+            "node": "Debug Logger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Registration": {
+      "main": [
+        [
+          {
+            "node": "Debug Logger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Login": {
+      "main": [
+        [
+          {
+            "node": "Debug Logger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process KeepAlive": {
+      "main": [
+        [
+          {
+            "node": "Debug Logger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "versionId": "1",
+  "id": "biometric-xml-to-json"
+}
